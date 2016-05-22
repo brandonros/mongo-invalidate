@@ -1,20 +1,21 @@
 'use strict';
 
 import MongoDB from 'mongodb';
+import jsondiffpatch from 'jsondiffpatch';
 
 module.exports = class DB {
-	constructor(conn) { 
-		this.conn = conn; 
+	constructor(db_conn, cache_conn) { 
+		this.db_conn = db_conn; 
+		this.cache_conn = cache_conn;
+
 		this.removals = {};
 		this.modifications = {};
 	}
 
-	static ObjectId(str) { return MongoDB.ObjectId(str); }
-
 	async stream(collection, query, fields) {
 		let docs = [];
 			
-		let cursor = this.conn.collection(collection).find(query, fields);
+		let cursor = this.db_conn.collection(collection).find(query, fields);
 
 		return new Promise((resolve, reject) => {
 			cursor.on('data', doc => docs.push(doc));
@@ -27,7 +28,7 @@ module.exports = class DB {
 		let docs = await this.stream(collection, query, { _id: 1 });
 		let _ids = docs.map( doc => doc._id );
 
-		return await this.conn.collection(collection).update(query, update, options)
+		return await this.db_conn.collection(collection).update(query, update, options)
 			.then( res => {
 				if (res.result.upserted) {
 					_ids = _ids.concat(res.result.upserted.map( r => r._id ));
@@ -55,7 +56,7 @@ module.exports = class DB {
 
 		_ids.forEach( _id => this.removals[collection].add(_id.toString()) );
 
-		return await this.conn.collection(collection).remove(query);
+		return await this.db_conn.collection(collection).remove(query);
 	}
 
 	async insert(collection, docs) {
@@ -67,7 +68,7 @@ module.exports = class DB {
 
 		_ids.forEach( _id => this.modifications[collection].add(_id.toString()) );
 
-		return await this.conn.collection(collection).insertMany(docs);
+		return await this.db_conn.collection(collection).insertMany(docs);
 	}
 
 	consume(collection) {
@@ -99,5 +100,42 @@ module.exports = class DB {
 		}
 
 		return invalidations;
+	}
+
+	async generate_patches(collection) {
+		let invalidations = this.consume(collection);
+
+		let patches = [];
+
+		if (invalidations.modifications.length) {
+			let old_docs = await this.cache_conn.hmgetAsync(collection, invalidations.modifications);
+			let new_docs = await this.stream(collection, { _id: { $in: invalidations.modifications.map( _id => MongoDB.ObjectId(_id) ) } });
+
+			console.log(new_docs);
+			console.log(old_docs);
+			
+			new_docs.forEach( (new_doc, index) => {
+				let old_doc = old_docs[index];
+
+				if (!old_doc) {
+					patches.push({
+						type: 'save',
+						doc: new_doc
+					});
+				}
+
+				else {
+					patches.push({
+						type: 'update',
+						_id: old_doc._id,
+						patch: jsondiffpatch.diff(old_doc, new_doc)
+					});
+				}
+			});
+		}
+
+		invalidations.removals.forEach( removal => patches.push({ type: 'removal', _id: removal }));
+
+		return patches;
 	}
 };
