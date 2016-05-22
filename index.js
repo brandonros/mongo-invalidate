@@ -2,52 +2,76 @@
 
 import MongoDB from 'mongodb';
 
-const db = module.exports;
+module.exports = class DB {
+	constructor(url) { 
+		this.url = url;
+		this.conn = null; 
+		this.removals = new Set();
+		this.modifications = new Set();
+	}
 
-db.ObjectId = str => MongoDB.ObjectId(str);
+	async init() { 
+		this.conn = await MongoDB.MongoClient.connect(this.url);
+	};
 
-db.init = async url => {
-	return await MongoDB.MongoClient.connect(url);
-};
+	static ObjectId(str) { return MongoDB.ObjectId(str); }
 
-db.stream = (collection, query, fields) => {
-	let docs = [];
-		
-	let cursor = collection.find(query, fields);
+	async stream(collection, query, fields) {
+		let docs = [];
+			
+		let cursor = this.conn.collection(collection).find(query, fields);
 
-	return new Promise((resolve, reject) => {
-		cursor.on('data', doc => docs.push(doc));
+		return new Promise((resolve, reject) => {
+			cursor.on('data', doc => docs.push(doc));
 
-		cursor.once('end', () => resolve(docs));
-	});
-};
-
-db.update = async (collection, query, update, options) => {
-	let docs = await module.exports.stream(collection, query, { _id: 1 });
-	let _ids = docs.map( doc => doc._id );
-
-	return await collection.update(query, update, options)
-		.then( res => {
-			if (res.result.upserted) {
-				_ids = _ids.concat(res.result.upserted.map( r => r._id ));
-			}
-
-			return {
-				writeRes: res,
-				_ids: _ids
-			};
+			cursor.once('end', () => resolve(docs));
 		});
-};
+	}
 
-db.remove = async (collection, query) => {
-	let docs = await db.stream(collection, query, { _id: 1 });
-	let _ids = docs.map( doc => doc._id );
+	async update(collection, query, update, options) {
+		let docs = await this.stream(collection, query, { _id: 1 });
+		let _ids = docs.map( doc => doc._id );
 
-	return await collection.remove(query).then( res => ({ writeRes: res, _ids: _ids }));
-};
+		return await this.conn.collection(collection).update(query, update, options)
+			.then( res => {
+				if (res.result.upserted) {
+					_ids = _ids.concat(res.result.upserted.map( r => r._id ));
+				}
 
-db.insert = async (collection, docs) => {
-	let _ids = docs.map( doc => doc._id );
+				if (res.result.nModified || res.result.upserted) {
+					_ids.forEach( _id => this.modifications.add(_id.toString()) );
+				}
 
-	return await collection.insertMany(docs).then( res => ({ writeRes: res, _ids: _ids }));
+				return res;
+			});
+	}
+
+	async remove(collection, query) {
+		let docs = await this.stream(collection, query, { _id: 1 });
+		let _ids = docs.map( doc => doc._id );
+
+		_ids.forEach( _id => this.removals.add(_id.toString()) );
+
+		return await this.conn.collection(collection).remove(query);
+	}
+
+	async insert(collection, docs) {
+		let _ids = docs.map( doc => doc._id );
+
+		_ids.forEach( _id => this.modifications.add(_id.toString()) );
+
+		return await this.conn.collection(collection).insertMany(docs);
+	}
+
+	consume() {
+		let invalidations = {
+			modifications: Array.from(this.modifications).filter( m => !this.removals.has(m) ),
+			removals: Array.from(this.removals)
+		};
+
+		this.modifications = new Set();
+		this.removals = new Set();
+
+		return invalidations;
+	}
 };
