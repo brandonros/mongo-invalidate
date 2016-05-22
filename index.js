@@ -3,16 +3,11 @@
 import MongoDB from 'mongodb';
 
 module.exports = class DB {
-	constructor(url) { 
-		this.url = url;
-		this.conn = null; 
-		this.removals = new Set();
-		this.modifications = new Set();
+	constructor(conn) { 
+		this.conn = conn; 
+		this.removals = {};
+		this.modifications = {};
 	}
-
-	async init() { 
-		this.conn = await MongoDB.MongoClient.connect(this.url);
-	};
 
 	static ObjectId(str) { return MongoDB.ObjectId(str); }
 
@@ -39,7 +34,11 @@ module.exports = class DB {
 				}
 
 				if (res.result.nModified || res.result.upserted) {
-					_ids.forEach( _id => this.modifications.add(_id.toString()) );
+					if (!this.modifications[collection]) {
+						this.modifications[collection] = new Set();
+					}
+
+					_ids.forEach( _id => this.modifications[collection].add(_id.toString()) );
 				}
 
 				return res;
@@ -50,7 +49,11 @@ module.exports = class DB {
 		let docs = await this.stream(collection, query, { _id: 1 });
 		let _ids = docs.map( doc => doc._id );
 
-		_ids.forEach( _id => this.removals.add(_id.toString()) );
+		if (!this.removals[collection]) {
+			this.removals[collection] = new Set();
+		}
+
+		_ids.forEach( _id => this.removals[collection].add(_id.toString()) );
 
 		return await this.conn.collection(collection).remove(query);
 	}
@@ -58,19 +61,42 @@ module.exports = class DB {
 	async insert(collection, docs) {
 		let _ids = docs.map( doc => doc._id );
 
-		_ids.forEach( _id => this.modifications.add(_id.toString()) );
+		if (!this.modifications[collection]) {
+			this.modifications[collection] = new Set();
+		}
+
+		_ids.forEach( _id => this.modifications[collection].add(_id.toString()) );
 
 		return await this.conn.collection(collection).insertMany(docs);
 	}
 
-	consume() {
+	consume(collection) {
 		let invalidations = {
-			modifications: Array.from(this.modifications).filter( m => !this.removals.has(m) ),
-			removals: Array.from(this.removals)
+			modifications: [],
+			removals: []
 		};
 
-		this.modifications = new Set();
-		this.removals = new Set();
+		if (this.modifications[collection] && this.removals[collection]) {
+			invalidations.modifications = Array.from(this.modifications[collection]).filter( m => !this.removals[collection].has(m) );
+			invalidations.removals = Array.from(this.removals[collection]);
+
+			this.modifications[collection].clear();
+			this.removals[collection].clear();
+		}
+
+		else {
+			if (this.modifications[collection]) {
+				invalidations.modifications = Array.from(this.modifications[collection]);
+
+				this.modifications[collection].clear();
+			}
+
+			if (this.removals[collection]) {
+				invalidations.removals = Array.from(this.removals[collection]);
+
+				this.removals[collection].clear();
+			}
+		}
 
 		return invalidations;
 	}
