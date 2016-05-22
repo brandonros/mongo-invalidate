@@ -1,6 +1,6 @@
 'use strict';
 
-let MongoDB = require('mongodb');
+const MongoDB = require('mongodb');
 
 module.exports = {
 	init: async function (url) {
@@ -22,12 +22,18 @@ module.exports = {
 		});
 	},
 	update: async function (collection, query, update, options) {
-		let _ids = await this.stream(collection, query, { _id: 1 }).map(function (doc) {
+		let _ids = (await this.stream(collection, query, { _id: 1 })).map(function (doc) {
 			return doc._id;
 		});
 
 		return await collection.update(query, update, options)
 			.then(function (res) {
+				if (res.result.upserted) {
+					_ids = _ids.concat(res.result.upserted.map(function (r) {
+						return r._id;
+					}));
+				}
+
 				return {
 					writeRes: res,
 					_ids: _ids
@@ -48,7 +54,7 @@ module.exports = {
 			});
 	},
 	insert: async function (collection, docs) {
-		let _ids = docs.map(function (d) {
+		let _ids = docs.map(function (doc) {
 			return doc._id;
 		});
 
@@ -59,5 +65,8 @@ module.exports = {
 					_ids: _ids
 				};
 			});
+	},
+	ObjectId: function (str) {
+		return MongoDB.ObjectId(str);
 	}
 };
